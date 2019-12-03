@@ -3,19 +3,27 @@
 // Philip Jander, 2019
 // Thanks to Ralf Westphal (@ralfw) for the challenge.
 
+// /// simplistic event store - keeps elements in a list in order of time: less performant, more intuitive
+// module Store =
+//     // type public T<'event> = 'event list
+//     // let public empty : T<'event> = []
+//     // let public append (store:T<'event>) (e:'event) = 
+//     //     // printf "%A\n" e
+//     //     (e :: List.rev store) |> List.rev
 
+//     type EventSourced<'event> = 'event list -> 'event list
+//     type EventSourcedBuilder<'event>() =
+//         member __.Bind (m, f) = f m
+//         member __.Yield (e: 'event) = fun (ee: 'event list) -> List.concat [ ee; [e] ]
+//         member __.YieldFrom (e1: 'event list) = (fun (e2: 'event list) -> List.concat [ e2; e1 ])
+//         member __.Combine (f: EventSourced<'event>, g: EventSourced<'event>) = fun (ee: 'event list) -> List.concat [ee; f []; g []]
+//         member __.Delay f = fun (ee: 'event list) -> (f()) ee
+//         member __.Zero = []
+//         member __.Run (f : EventSourced<'event>) = f []            
 
-/// simplistic event store - keeps elements in a list in order of time: less performant, more intuitive
-module Store =
-    type public T<'event> = 'event list
-    let public empty : T<'event> = []
-    let public append (store:T<'event>) (e:'event) = 
-        // printf "%A\n" e
-        (e :: List.rev store) |> List.rev
+//     let eventsourced<'event> = new EventSourcedBuilder<'event>()
 
-
-
-/// projections and event emitters
+/// Bowling domain. Contains structure, projections, command handlers and query handlers.
 module Bowling =
 
     type FrameType = 
@@ -31,7 +39,7 @@ module Bowling =
         | RollWasRegistered of int 
         
         /// a frame (2 rolls or a strike roll) was completed 
-        | FrameWasCompleted of FrameType * int 
+        | FrameWasCompleted of FrameType 
         
         /// a frame requires one or two bonus rolls
         | BonusRequired of int 
@@ -80,62 +88,87 @@ module Bowling =
     /// projection: number of previous frames, the next/current roll should count towards as a bonus
     let bonuses_required_for_next_roll events = pending_bonus events |> List.length
 
-    /// emit RollWasRegistered event
-    let register_roll pins = fun state -> Store.append state (RollWasRegistered pins)
-
-    /// emit BonusWasRegistered event
-    let register_bonus pins = fun state -> Store.append state (BonusWasRegistered pins)
-
-    /// emit FrameWasCompleted event
-    let frame_completed frame_type score = fun state -> Store.append state (FrameWasCompleted (frame_type, score))
-
-    /// emit BonusRequired event
-    let bonus_required rolls = fun state -> Store.append state (BonusRequired rolls)
-
     /// game state: simply the event store
-    type public T = Store.T<BowlingEvent>
+    type public T = BowlingEvent list
 
     /// command handler to start a game
-    let public start () : T = Store.empty
+    let public start () = []
+
+    // let myield e s = List.concat [ s; [ e ] ]
+    // let bind m c s = c (m s) s
+    // let mif c e s = if c then e s else s
+    // let mthen b s = b () s
+
+    type CE() =
+        member __.Bind (v, f) = fun s -> f (v s) s
+        member __.Yield e = fun s -> List.concat [ s; [ e ] ]
+        member __.Zero () = fun s -> s
+        member __.Combine (f, g) = f >> (g())
+        member __.Delay f = f
+        member __.Run f = f ()
+
+    let eventsourced = new CE()
 
     /// command handler to register the next roll
-    let public register (state:T) (roll: int) : T = 
-        let state = 
-            let bonuses = bonuses_required_for_next_roll state
-            if (bonuses > 0)
-            then register_bonus (bonuses * roll) state
-            else state
+    let public register (pins: int) = 
+        eventsourced {
+            
+            let! bonuses_pending = bonuses_required_for_next_roll
+            if bonuses_pending > 0 then yield (BonusWasRegistered (bonuses_pending * pins))
 
-        let state = 
-            if not (all_frames_completed state)
+            let! completed = all_frames_completed
+            if (not completed)
             then 
-                let state = register_roll roll state
-                let rolls = rolls_in_active_frame state
-                let score = net_score_in_active_frame state
-                let state = 
-                    if rolls = 2 || score = 10
+
+                yield (RollWasRegistered pins)
+
+                let! rolls = rolls_in_active_frame
+                let! score = net_score_in_active_frame                
+                if rolls = 2 || score = 10
                     then 
-                        let score = net_score_in_active_frame state
                         let frame_type = 
                             match score, rolls with
                             | 10, 1 -> Strike
                             | 10, 2 -> Spare
                             | _ -> Normal
-                        let state = frame_completed frame_type score state
-                        match frame_type with
-                        | Normal -> state
-                        | Spare -> bonus_required 1 state
-                        | Strike -> bonus_required 2 state
-                    else state
-                state
-            else state
-        state
+                        yield (FrameWasCompleted frame_type)
+                        if frame_type = Spare then yield (BonusRequired 1)
+                        if frame_type = Strike then yield (BonusRequired 2)
+        }
+
+    /// command handler to register the next roll
+    // let public register (pins: int) = 
+    //     bind bonuses_required_for_next_roll (fun bonuses -> 
+    //       mif (bonuses > 0) (myield (BonusWasRegistered (bonuses * pins))))
+
+    //     >> bind all_frames_completed (fun completed ->
+    //       mif (not completed) (mthen (fun () ->
+          
+    //         myield (RollWasRegistered pins)
+
+    //         >> bind (net_score_in_active_frame) (fun score ->
+    //             bind (rolls_in_active_frame) (fun rolls -> 
+
+    //               mif (rolls=2 || score=10) (mthen (fun () -> 
+    //                 let frame_type = 
+    //                     match score, rolls with
+    //                     | 10, 1 -> Strike
+    //                     | 10, 2 -> Spare
+    //                     | _ -> Normal
+
+    //                 myield (FrameWasCompleted frame_type)                                                
+    //                 >> (mif (frame_type = Spare) (myield (BonusRequired 1)))
+    //                 >> (mif (frame_type = Strike) (myield (BonusRequired 2)))
+    //                 ))))))
+    //     )       
 
     /// query handler to return the current score
     let public score (t:T) = sum_of_rolls t + sum_of_bonuses t
 
+let flip f = fun a b -> f b a
+
 /// game function - subject under test
-let bowling rolls = rolls |> List.fold (Bowling.register) (Bowling.start()) |> Bowling.score
+let bowling rolls = rolls |> List.fold (flip Bowling.register) (Bowling.start()) |> Bowling.score
 
 module Test =
     let run subject (rolls,expected) =
