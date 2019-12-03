@@ -1,124 +1,159 @@
-﻿
-type FrameType = Normal | Spare | Strike
+﻿// Event-sourced solution to the Bowling Kata
+// This is obviously not a 'simple' solution, but to demonstrate event sourcing in a minimalistic domain
+// Philip Jander, 2019
+// Thanks to Ralf Westphal (@ralfw) for the challenge.
 
-type BowlingEvent =
-    | RollWasRegistered of int
-    | FrameWasCompleted of FrameType * int
-    | BonusWasRegistered of int
-    | BonusRequired of int
 
+
+/// simplistic event store - keeps elements in a list in order of time: less performant, more intuitive
 module Store =
-    type public T = BowlingEvent list
-    let public empty : T = []
-    let public append (t:T) (e:BowlingEvent) = 
+    type public T<'event> = 'event list
+    let public empty : T<'event> = []
+    let public append (store:T<'event>) (e:'event) = 
         // printf "%A\n" e
-        (e :: List.rev t) |> List.rev
+        (e :: List.rev store) |> List.rev
 
+
+
+/// projections and event emitters
 module Bowling =
 
-    type public GameOperation = (Store.T -> Store.T)
+    type FrameType = 
+        /// a frame in which the player did not clear all pins
+        | Normal 
+        /// a frame in which the player cleared all pins in 2 rolls, leads to one bonus roll
+        | Spare 
+        /// a frame in which the player cleared all pins in a single roll, leads to two bonus roll
+        | Strike
 
-    let public sum_of_rolls (events: Store.T) = 
+    type BowlingEvent =
+        /// a roll was taken by the player that counts towards normal score
+        | RollWasRegistered of int 
+        
+        /// a frame (2 rolls or a strike roll) was completed 
+        | FrameWasCompleted of FrameType * int 
+        
+        /// a frame requires one or two bonus rolls
+        | BonusRequired of int 
+        
+        /// a roll counts towards pending bonuses with the total score given
+        | BonusWasRegistered of int 
+
+    /// projection: net score of all rolls
+    let sum_of_rolls events = 
         List.fold (fun a -> function | RollWasRegistered pins -> a + pins | _ -> a ) 0 events
 
-    let public sum_of_bonuses (events: Store.T) = 
+    /// projection: bonus score of all rolls counting towards bonuses
+    let sum_of_bonuses events = 
         List.fold (fun a -> function | BonusWasRegistered pins -> a + pins | _ -> a ) 0 events
 
-    let public frames_completed (events: Store.T) = 
+    /// projection: number of frames completed up to now
+    let private frames_completed events = 
         List.fold (fun a -> function | FrameWasCompleted _ -> a + 1 | _ -> a ) 0 events
 
-    let public net_score_in_active_frame (events: Store.T) = 
+    /// projection: are all normal rolls completed (bonus might still be pending)
+    let all_frames_completed state = (frames_completed state) = 10
+
+    /// projection: net score in the current frame 
+    let net_score_in_active_frame events = 
         List.fold 
             (fun a -> function 
                 | RollWasRegistered pins -> a + pins 
                 | FrameWasCompleted _ -> 0
                 | _ -> a ) 0 events
 
-    let public rolls_in_active_frame (events: Store.T) = 
+    /// projection: number of rolls in the current frame 
+    let rolls_in_active_frame events = 
         List.fold 
             (fun a -> function 
                 | RollWasRegistered _ -> a + 1
                 | FrameWasCompleted _ -> 0
                 | _ -> a ) 0 events
 
-    let public pending_bonus (events: Store.T) = 
+    /// projection: a list of number of bonus rolls still required, e.g. [1;2] means that from previous frames, there are still 1 and two bonus rolls pending.
+    let private pending_bonus events = 
         List.fold (fun a -> function 
             | BonusRequired rolls -> rolls :: a
             | BonusWasRegistered _ -> a |> List.map (fun r -> r - 1) |> List.filter (fun r -> r > 0)
             | _ -> a ) [] events
 
-    let public frame_needs_bonus (events: Store.T) = pending_bonus events |> List.length
+    /// projection: number of previous frames, the next/current roll should count towards as a bonus
+    let bonuses_required_for_next_roll events = pending_bonus events |> List.length
 
-    let public register_roll pins = fun state -> Store.append state (RollWasRegistered pins)
+    /// emit RollWasRegistered event
+    let register_roll pins = fun state -> Store.append state (RollWasRegistered pins)
 
-    let public register_frame_completed frame_type score = fun state -> Store.append state (FrameWasCompleted (frame_type, score))
+    /// emit BonusWasRegistered event
+    let register_bonus pins = fun state -> Store.append state (BonusWasRegistered pins)
 
-    let public register_bonus pins = fun state -> Store.append state (BonusWasRegistered pins)
+    /// emit FrameWasCompleted event
+    let frame_completed frame_type score = fun state -> Store.append state (FrameWasCompleted (frame_type, score))
 
-    let public bonus_required rolls = fun state -> Store.append state (BonusRequired rolls)
+    /// emit BonusRequired event
+    let bonus_required rolls = fun state -> Store.append state (BonusRequired rolls)
 
-    let public game_completed state = (frames_completed state) = 10
+    /// game state: simply the event store
+    type public T = Store.T<BowlingEvent>
 
-module Game =
-    type public T = Store.T
-
+    /// command handler to start a game
     let public start () : T = Store.empty
 
+    /// command handler to register the next roll
     let public register (state:T) (roll: int) : T = 
         let state = 
-            let bonuses = Bowling.frame_needs_bonus state
+            let bonuses = bonuses_required_for_next_roll state
             if (bonuses > 0)
-            then Bowling.register_bonus (bonuses * roll) state
+            then register_bonus (bonuses * roll) state
             else state
 
         let state = 
-            if not (Bowling.game_completed state)
+            if not (all_frames_completed state)
             then 
-                let state = Bowling.register_roll roll state
-                let rolls = Bowling.rolls_in_active_frame state
-                let score = Bowling.net_score_in_active_frame state
+                let state = register_roll roll state
+                let rolls = rolls_in_active_frame state
+                let score = net_score_in_active_frame state
                 let state = 
                     if rolls = 2 || score = 10
                     then 
-                        let score = Bowling.net_score_in_active_frame state
+                        let score = net_score_in_active_frame state
                         let frame_type = 
                             match score, rolls with
                             | 10, 1 -> Strike
                             | 10, 2 -> Spare
                             | _ -> Normal
-                        let state = Bowling.register_frame_completed frame_type score state
+                        let state = frame_completed frame_type score state
                         match frame_type with
                         | Normal -> state
-                        | Spare -> Bowling.bonus_required 1 state
-                        | Strike -> Bowling.bonus_required 2 state
+                        | Spare -> bonus_required 1 state
+                        | Strike -> bonus_required 2 state
                     else state
                 state
             else state
         state
 
-    let public score (t:T) = Bowling.sum_of_rolls t + Bowling.sum_of_bonuses t
+    /// query handler to return the current score
+    let public score (t:T) = sum_of_rolls t + sum_of_bonuses t
 
+/// game function - subject under test
+let bowling rolls = rolls |> List.fold (Bowling.register) (Bowling.start()) |> Bowling.score
 
-let bowling rolls =
-    List.fold (Game.register) (Game.start()) rolls |> Game.score
+module Test =
+    let run subject (rolls,expected) =
+        let actual = subject rolls
+        if actual = expected
+            then "OK\n"
+            else sprintf "Expected %d, but found %d\n" expected actual
 
-
-let test subject (rolls,expected) =
-    let actual = subject rolls
-    if actual = expected
-        then "OK\n"
-        else sprintf "Expected %d, but found %d\n" expected actual
-
-let testcases = 
-    [ [ 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 0
-      [ 1; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 1
-      [ 1; 4; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 5
-      [ 5; 5; 3; 2; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 15 + 3
-      [ 10; 3; 2; 5; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 20 + 5
-      [ 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10 ], 300 ]
+    let cases = 
+        [ [ 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 0
+          [ 1; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 1
+          [ 1; 4; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 5
+          [ 5; 5; 3; 2; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 15 + 3
+          [ 10; 3; 2; 5; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ], 20 + 5
+          [ 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10 ], 300 ]
 
 [<EntryPoint>]
 let main argv =
     // bowling [ 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10 ] |> printf "%d"
-    testcases |> List.map(test bowling) |> List.iter (printf "%s")    
+    Test.cases |> List.map(Test.run bowling) |> List.iter (printf "%s")    
     0 // return an integer exit code
