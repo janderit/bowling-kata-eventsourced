@@ -3,25 +3,17 @@
 // Philip Jander, 2019
 // Thanks to Ralf Westphal (@ralfw) for the challenge.
 
-// /// simplistic event store - keeps elements in a list in order of time: less performant, more intuitive
-// module Store =
-//     // type public T<'event> = 'event list
-//     // let public empty : T<'event> = []
-//     // let public append (store:T<'event>) (e:'event) = 
-//     //     // printf "%A\n" e
-//     //     (e :: List.rev store) |> List.rev
+/// Computation Expression Builder for functional event sourcing
+module EventSourced = 
+    type EventSourcedBuilder() =
+        member __.Bind (v, f) = fun history -> f (v history) history
+        member __.Yield e = fun history -> List.concat [ history; [ e ] ]
+        member __.Zero () = id
+        member __.Combine (f, g) = f >> (g())
+        member __.Delay f = f
+        member __.Run f = f ()
 
-//     type EventSourced<'event> = 'event list -> 'event list
-//     type EventSourcedBuilder<'event>() =
-//         member __.Bind (m, f) = f m
-//         member __.Yield (e: 'event) = fun (ee: 'event list) -> List.concat [ ee; [e] ]
-//         member __.YieldFrom (e1: 'event list) = (fun (e2: 'event list) -> List.concat [ e2; e1 ])
-//         member __.Combine (f: EventSourced<'event>, g: EventSourced<'event>) = fun (ee: 'event list) -> List.concat [ee; f []; g []]
-//         member __.Delay f = fun (ee: 'event list) -> (f()) ee
-//         member __.Zero = []
-//         member __.Run (f : EventSourced<'event>) = f []            
-
-//     let eventsourced<'event> = new EventSourcedBuilder<'event>()
+    let script = new EventSourcedBuilder()
 
 /// Bowling domain. Contains structure, projections, command handlers and query handlers.
 module Bowling =
@@ -92,26 +84,11 @@ module Bowling =
     type public T = BowlingEvent list
 
     /// command handler to start a game
-    let public start () = []
-
-    // let myield e s = List.concat [ s; [ e ] ]
-    // let bind m c s = c (m s) s
-    // let mif c e s = if c then e s else s
-    // let mthen b s = b () s
-
-    type CE() =
-        member __.Bind (v, f) = fun s -> f (v s) s
-        member __.Yield e = fun s -> List.concat [ s; [ e ] ]
-        member __.Zero () = fun s -> s
-        member __.Combine (f, g) = f >> (g())
-        member __.Delay f = f
-        member __.Run f = f ()
-
-    let eventsourced = new CE()
+    let public start () = []       
 
     /// command handler to register the next roll
     let public register (pins: int) = 
-        eventsourced {
+        EventSourced.script {
             
             let! bonuses_pending = bonuses_required_for_next_roll
             if bonuses_pending > 0 then yield (BonusWasRegistered (bonuses_pending * pins))
@@ -135,32 +112,6 @@ module Bowling =
                         if frame_type = Spare then yield (BonusRequired 1)
                         if frame_type = Strike then yield (BonusRequired 2)
         }
-
-    /// command handler to register the next roll
-    // let public register (pins: int) = 
-    //     bind bonuses_required_for_next_roll (fun bonuses -> 
-    //       mif (bonuses > 0) (myield (BonusWasRegistered (bonuses * pins))))
-
-    //     >> bind all_frames_completed (fun completed ->
-    //       mif (not completed) (mthen (fun () ->
-          
-    //         myield (RollWasRegistered pins)
-
-    //         >> bind (net_score_in_active_frame) (fun score ->
-    //             bind (rolls_in_active_frame) (fun rolls -> 
-
-    //               mif (rolls=2 || score=10) (mthen (fun () -> 
-    //                 let frame_type = 
-    //                     match score, rolls with
-    //                     | 10, 1 -> Strike
-    //                     | 10, 2 -> Spare
-    //                     | _ -> Normal
-
-    //                 myield (FrameWasCompleted frame_type)                                                
-    //                 >> (mif (frame_type = Spare) (myield (BonusRequired 1)))
-    //                 >> (mif (frame_type = Strike) (myield (BonusRequired 2)))
-    //                 ))))))
-    //     )       
 
     /// query handler to return the current score
     let public score (t:T) = sum_of_rolls t + sum_of_bonuses t
