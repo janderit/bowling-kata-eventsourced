@@ -11,6 +11,7 @@ module Store =
     type public T = BowlingEvent list
     let public empty : T = []
     let public append (t:T) (e:BowlingEvent) = 
+        // printf "%A\n" e
         (e :: List.rev t) |> List.rev
 
 module Bowling =
@@ -43,7 +44,7 @@ module Bowling =
     let public pending_bonus (events: Store.T) = 
         List.fold (fun a -> function 
             | BonusRequired rolls -> rolls :: a
-            | BonusWasRegistered _ -> a |> List.map ((-) 1) |> List.filter ((<>) 0)
+            | BonusWasRegistered _ -> a |> List.map (fun r -> r - 1) |> List.filter (fun r -> r > 0)
             | _ -> a ) [] events
 
     let public frame_needs_bonus (events: Store.T) = pending_bonus events |> List.length
@@ -74,16 +75,22 @@ module Game =
             if not (Bowling.game_completed state)
             then 
                 let state = Bowling.register_roll roll state
+                let rolls = Bowling.rolls_in_active_frame state
+                let score = Bowling.net_score_in_active_frame state
                 let state = 
-                    if (Bowling.rolls_in_active_frame state) = 2
+                    if rolls = 2 || score = 10
                     then 
                         let score = Bowling.net_score_in_active_frame state
-                        let frame_type = if score = 10 then Spare else Normal
+                        let frame_type = 
+                            match score, rolls with
+                            | 10, 1 -> Strike
+                            | 10, 2 -> Spare
+                            | _ -> Normal
                         let state = Bowling.register_frame_completed frame_type score state
                         match frame_type with
                         | Normal -> state
                         | Spare -> Bowling.bonus_required 1 state
-                        | Strike -> failwith "not implemented"
+                        | Strike -> Bowling.bonus_required 2 state
                     else state
                 state
             else state
@@ -112,6 +119,6 @@ let testcases =
 
 [<EntryPoint>]
 let main argv =
-    // bowling [ 5; 5; 3; 2; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0; 0 ] |> printf "%d"
+    // bowling [ 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10; 10 ] |> printf "%d"
     testcases |> List.map(test bowling) |> List.iter (printf "%s")    
     0 // return an integer exit code
